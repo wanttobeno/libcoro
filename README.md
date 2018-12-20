@@ -31,18 +31,18 @@ void exit(); //当协程完成执行时，此函数运行。
 内部event_->notifyAll();
 	main()->swap();
 
-void swap(); // 将控制权传递给此协程
+void swap(); // 将运行权给其它协程，当前正在执行的协程会挂起。
 
 void yield();  // 挂起coroutine，将coroutine设置为挂起状态。RUNNING状态切换为RUNNABLE状态，下次循环会继续运行
 
 
-void block(); // 阻止当前协同程序，直到发生某些I/O事件。 协程会在明确安排之前不得重新安排。
+void block(); // 阻止当前协同程序，直到发生某些I/O事件。 协程会在明确安排之前不得重新安排。RUNNING状态切换为BLOCKED状态
 内部hub()->blocked_++;
 
 void unblock(); // 解除阻止
 内部hub()->blocked_--;
 
-void wait(); // 阻止当前协同程序，直到发生某些事件。 协程不会被重新安排，直到明确安排。
+void wait(); // 阻止当前协同程序，直到发生某些事件。 协程不会被重新安排，直到明确安排。BLOCKED状态切换为RUNNABLE状态
 内部hub()->waiting_++;
 
 void notify(); // 在事件发生时取消阻止协同程序。
@@ -57,9 +57,11 @@ Ptr<Event> event_;  // 信号
 
 这个状态的过程比较的重要！
 
-NEW --> 
+1、NEW --> RUNNING --> EXITED
 
-WAITING --> RUNNABLE --> RUNNING --> EXITED
+2、RUNNING --> BLOCKED --> RUNNABLE --> RUNNING --> EXITED
+
+3、WAITING --> RUNNABLE --> RUNNING --> EXITED
 
 ```c++
 Coroutine::Coroutine(); // 初始化状态为RUNNING状态
@@ -70,7 +72,7 @@ void Coroutine::wait(); // RUNNING切换为WAITING状态
 
 void Coroutine::notify(); // WAITING切换为RUNNABLE状态
 
-void Coroutine::swap(); // RUNNABLE切换为RUNNING；NEW切换为RUNNING;BLOCKED切换为RUNNING。将控制交换到此协同程序，导致当前协程暂停。当另一个协程交换回此协程时，此函数返回。
+void Coroutine::swap(); // 当前RUNNABLE切换为RUNNING；NEW切换为RUNNING;BLOCKED切换为RUNNING。最重要的函数，控制协程的中断，切换。
 
 void Coroutine::exit(); // RUNNING切换为EXITED状态
 
@@ -84,6 +86,7 @@ void Coroutine::unblock(); // BLOCKED切换为RUNNABLE状态
 ```
 
 ##### Coroutine 内存分配
+
 每个协程分配CORO_STACK_SIZE(1M)的内存大小,保存到成员变量
 Stack stack_;,所分配的内存会在Coroutine析构函数执行后释放。
 
@@ -103,21 +106,24 @@ struct StackFrame {
     void* returnAddr; // coroStart() stack frame here
 };
 ```
-stackPointer_ // 保存初始化的信息地址
+stackPointer_ // 保存初始化的信息地址，未被调用。
+
+Coroutine析构的时候释放内存。
 
 
+##### Event 协程同步事件
 
-##### Event 协程同步原语
+协程的调用过程是单线程的，Event的控制是通过改变协程的状态来控制的。
 
 ```c++
 void notifyAll(); // 通知所有协程运行，添加到std::vector<EventRecord>容器中
-void wait();  // 等待协程信号
+void wait();  // 等待协程信号。实际是将协程的RUNNING切换为WAITING状态并挂起，调用其他的协程。
 ```
 
 ##### Hub 管理协程容器
 
 Hub类管理所有coroutines，events和I/O。
-当等待的事件（通道,I/O等）发出完成信号时执行调用。
+等待的事件（通道,I/O等）发出完成信号，在执行调用。
 
 被定义为一个静态变量，通过coro::run()调用。
 
@@ -134,10 +140,13 @@ void Hub::run(); // 循环运行，每次取一个协程
 ```C++
 // 添加函数到协程容器
 coro::start(baz);
-// 挂起，::RUNNING状态切换为::RUNNABLE
+
+// 挂起，RUNNING状态切换为RUNNABLE状态
 coro::yield();
+
 // 函数中调用，用于定时中断，中断时间到，继续执行
 coro::sleep(coro::Time::millisec(1000));
+
 // 执行协程容器
 coro::run(); 
 ```
